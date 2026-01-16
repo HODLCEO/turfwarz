@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 
 // Publicly available fonts via Google Fonts (no bundling required)
 const FONT_CSS = `
@@ -66,8 +66,173 @@ const initTerritories = () =>
     isContested: t.startingOwner === null,
   }));
 
+// --- Liquid aura renderer (winner-take-all so colors "clash" instead of mixing) ---
+const hexToRgb = (hex: string) => {
+  const h = hex.replace("#", "");
+  const full = h.length === 3 ? h.split("").map((c) => c + c).join("") : h;
+  const n = parseInt(full, 16);
+  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
+};
+
+const LiquidAura = ({
+  territories,
+  districtW,
+  districtH,
+  getPoint,
+  quality = 270,
+}: {
+  territories: any[];
+  districtW: number;
+  districtH: number;
+  getPoint: (t: any) => { x: number; y: number };
+  quality?: number;
+}) => {
+  const ref = useRef<HTMLCanvasElement | null>(null);
+  const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 110);
+    return () => clearInterval(id);
+  }, []);
+
+  useEffect(() => {
+    const canvas = ref.current;
+    if (!canvas) return;
+
+    const dpr = Math.max(1, Math.min(2, typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1));
+    const W = Math.floor(quality * dpr);
+    const H = Math.floor(quality * dpr);
+    canvas.width = W;
+    canvas.height = H;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    const img = ctx.createImageData(W, H);
+    const data = img.data;
+
+    const colors = {
+      base: hexToRgb(FACTIONS.base.color),
+      hyperliquid: hexToRgb(FACTIONS.hyperliquid.color),
+      monad: hexToRgb(FACTIONS.monad.color),
+      neutral: { r: 150, g: 150, b: 150 },
+    };
+
+    const pts = territories.map((tt) => {
+      const p = getPoint(tt);
+      return {
+        x: p.x / districtW,
+        y: p.y / districtH,
+        owner: tt.currentOwner,
+        control: tt.control,
+      };
+    });
+
+    // Liquid params
+    const sigma = 0.175; // smaller => tighter blobs and sharper borders
+    const inv2s2 = 1 / (2 * sigma * sigma);
+
+    // Cheap flow noise
+    const noise = (x: number, y: number, t: number) => {
+      const a = Math.sin(x * 8.3 + t * 0.13) + Math.cos(y * 7.1 - t * 0.11);
+      const b = Math.sin((x + y) * 5.7 + t * 0.09);
+      return (a + b) / 3;
+    };
+
+    for (let j = 0; j < H; j++) {
+      const y0 = j / (H - 1);
+      for (let i = 0; i < W; i++) {
+        const x0 = i / (W - 1);
+
+        // flow warp for liquid motion
+        const n = noise(x0, y0, tick);
+        const x = x0 + n * 0.012;
+        const y = y0 + noise(y0, x0, tick + 7) * 0.012;
+
+        let sBase = 0,
+          sHyper = 0,
+          sMonad = 0,
+          sNeutral = 0;
+
+        for (const p of pts) {
+          const dx = x - p.x;
+          const dy = y - p.y;
+          const w = Math.exp(-(dx * dx + dy * dy) * inv2s2);
+
+          sBase += w * (p.control.base / 100);
+          sHyper += w * (p.control.hyperliquid / 100);
+          sMonad += w * (p.control.monad / 100);
+          if (!p.owner) sNeutral += w * 0.2;
+        }
+
+        // Winner-take-all => NO mixing
+        let winner: keyof typeof colors = "neutral";
+        let max = sNeutral;
+        if (sBase > max) {
+          max = sBase;
+          winner = "base";
+        }
+        if (sHyper > max) {
+          max = sHyper;
+          winner = "hyperliquid";
+        }
+        if (sMonad > max) {
+          max = sMonad;
+          winner = "monad";
+        }
+
+        // Alpha shaping for liquid mass
+        let a = Math.min(1, max * 1.25);
+        a = Math.max(0, a - 0.09);
+
+        // Clash shimmer near borders (where strengths are similar)
+        const edge = Math.abs(sBase - sHyper) + Math.abs(sHyper - sMonad) + Math.abs(sMonad - sBase);
+        const edgeBoost = Math.min(0.22, edge * 0.12);
+        a = Math.min(1, a + edgeBoost);
+
+        const idx = (j * W + i) * 4;
+        if (a < 0.04) {
+          data[idx + 3] = 0;
+          continue;
+        }
+
+        const c = colors[winner];
+        data[idx + 0] = c.r;
+        data[idx + 1] = c.g;
+        data[idx + 2] = c.b;
+        data[idx + 3] = Math.floor(255 * (0.62 * a));
+      }
+    }
+
+    ctx.putImageData(img, 0, 0);
+
+    // Add subtle glow pass (cheap)
+    ctx.globalCompositeOperation = "lighter";
+    ctx.filter = "blur(8px)";
+    ctx.globalAlpha = 0.2;
+    ctx.drawImage(canvas, 0, 0);
+    ctx.filter = "none";
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = "source-over";
+  }, [territories, districtW, districtH, getPoint, quality, tick]);
+
+  return (
+    <canvas
+      ref={ref}
+      style={{
+        width: "100%",
+        height: "100%",
+        borderRadius: "12px",
+        filter: "blur(5px) saturate(1.35) brightness(1.08)",
+        opacity: 0.98,
+        pointerEvents: "none",
+      }}
+    />
+  );
+};
+
 // View Toggle
-const ViewToggle = ({ view, onToggle }: { view: "grid" | "map"; onToggle: (v: "grid" | "map") => void }) => (
+const ViewToggle = ({ view, onToggle }: { view: string; onToggle: (v: string) => void }) => (
   <div style={{ display: "flex", background: "rgba(255,255,255,0.05)", borderRadius: "8px", padding: "3px", gap: "2px" }}>
     <button
       onClick={() => onToggle("grid")}
@@ -127,7 +292,7 @@ const CyberCityMapView = ({
   const shouldShowLabel = (id: number) => id === selectedTerritoryId || id === hoveredId;
 
   const toDistrict = (t: any) => {
-    // tighter playfield
+    // Tighter playfield
     const inset = 6;
     const w = Math.max(1, DISTRICT.w - inset * 2);
     const h = Math.max(1, DISTRICT.h - inset * 2);
@@ -250,30 +415,6 @@ const CyberCityMapView = ({
             <stop offset="100%" stopColor="#000" stopOpacity="0" />
           </radialGradient>
 
-          {/* Territory influence gradients as neon spill */}
-          {territories.map((t) => {
-            const owner = t.currentOwner ? (FACTIONS as any)[t.currentOwner] : null;
-            const dominance = t.currentOwner ? t.control[t.currentOwner] / 100 : 0;
-
-            if (!t.currentOwner) {
-              return (
-                <radialGradient key={`grad-${t.id}`} id={`territoryGrad-${t.id}`} cx="50%" cy="50%" r="100%">
-                  <stop offset="0%" stopColor="#a3a3a3" stopOpacity={0.26} />
-                  <stop offset="55%" stopColor="#6b6b6b" stopOpacity={0.10} />
-                  <stop offset="100%" stopColor="#2b2b2b" stopOpacity={0} />
-                </radialGradient>
-              );
-            }
-
-            return (
-              <radialGradient key={`grad-${t.id}`} id={`territoryGrad-${t.id}`} cx="50%" cy="50%" r="100%">
-                <stop offset="0%" stopColor={owner?.color || "#666"} stopOpacity={0.70 * dominance} />
-                <stop offset="45%" stopColor={owner?.color || "#444"} stopOpacity={0.22 * dominance} />
-                <stop offset="100%" stopColor={owner?.color || "#222"} stopOpacity={0} />
-              </radialGradient>
-            );
-          })}
-
           <linearGradient id="labelBg" x1="0" x2="1" y1="0" y2="1">
             <stop offset="0%" stopColor="rgba(0,0,0,0.78)" />
             <stop offset="100%" stopColor="rgba(0,0,0,0.40)" />
@@ -287,13 +428,13 @@ const CyberCityMapView = ({
         </defs>
 
         {/* Base background */}
-        <rect width="100" height="100" fill="#05050a" />
-        <rect width="100" height="100" fill="url(#cityGrid)" />
+        <rect width="100" height="100" fill="#05050a" pointerEvents="none" />
+        <rect width="100" height="100" fill="url(#cityGrid)" pointerEvents="none" />
 
         {/* Ambient faction lighting */}
-        <rect width="100" height="100" fill="url(#ambientMonad)" style={{ mixBlendMode: "screen" }} />
-        <rect width="100" height="100" fill="url(#ambientBase)" style={{ mixBlendMode: "screen" }} />
-        <rect width="100" height="100" fill="url(#ambientHyper)" style={{ mixBlendMode: "screen" }} />
+        <rect width="100" height="100" fill="url(#ambientMonad)" style={{ mixBlendMode: "screen" }} pointerEvents="none" />
+        <rect width="100" height="100" fill="url(#ambientBase)" style={{ mixBlendMode: "screen" }} pointerEvents="none" />
+        <rect width="100" height="100" fill="url(#ambientHyper)" style={{ mixBlendMode: "screen" }} pointerEvents="none" />
 
         {/* Buildings (outside district) — visual only */}
         {buildings.map((b, i) => (
@@ -352,24 +493,21 @@ const CyberCityMapView = ({
             pointerEvents="none"
           />
 
-          {/* Influence as neon spill (visual only) */}
-          {territories.map((t) => {
-            const p = toDistrict(t);
-            const dominance = t.currentOwner ? t.control[t.currentOwner] / 100 : 0.3;
-            const radius = 10 + dominance * 9;
-            return (
-              <ellipse
-                key={`spill-${t.id}`}
-                cx={p.x}
-                cy={p.y}
-                rx={radius}
-                ry={radius * 0.78}
-                fill={`url(#territoryGrad-${t.id})`}
-                style={{ mixBlendMode: "screen" }}
-                pointerEvents="none"
+          {/* Liquid aura (no mixing, like oil on water) */}
+          <foreignObject x={DISTRICT.x} y={DISTRICT.y} width={DISTRICT.w} height={DISTRICT.h} pointerEvents="none">
+            <div xmlns="http://www.w3.org/1999/xhtml" style={{ width: "100%", height: "100%", pointerEvents: "none" }}>
+              <LiquidAura
+                territories={territories}
+                districtW={DISTRICT.w}
+                districtH={DISTRICT.h}
+                quality={280}
+                getPoint={(tt) => {
+                  const p = toDistrict(tt);
+                  return { x: p.x - DISTRICT.x, y: p.y - DISTRICT.y };
+                }}
               />
-            );
-          })}
+            </div>
+          </foreignObject>
 
           {/* Inner vignette */}
           <rect
@@ -377,7 +515,7 @@ const CyberCityMapView = ({
             y={DISTRICT.y}
             width={DISTRICT.w}
             height={DISTRICT.h}
-            fill="rgba(0,0,0,0.28)"
+            fill="rgba(0,0,0,0.24)"
             style={{ mixBlendMode: "multiply" }}
             pointerEvents="none"
           />
@@ -399,20 +537,19 @@ const CyberCityMapView = ({
         {/* Markers (pins only — interactive) */}
         {territories.map((t) => {
           const p = toDistrict(t);
-          const owner = t.currentOwner ? (FACTIONS as any)[t.currentOwner] : null;
-
+          const owner = t.currentOwner ? FACTIONS[t.currentOwner] : null;
           const isSelected = selectedTerritory?.id === t.id;
           const isHovered = hoveredId === t.id;
           const isPressed = pressedId === t.id;
 
           const dominance = t.currentOwner ? Math.max(...Object.values(t.control)) : 33;
 
-          // contested/neutral styling
+          // Pins only; aura handles ownership.
           const markerColor = owner ? owner.color : t.isContested ? "#FBBF24" : "#b8b8b8";
 
           const scale = isPressed ? 0.92 : isSelected ? 1.04 : isHovered ? 1.03 : 1;
 
-          // Smaller pin sizing
+          // Smaller, snappier pins
           const pinScale = isSelected ? 0.30 : isHovered ? 0.28 : 0.26;
           const headR = isSelected ? 1.05 : isHovered ? 0.98 : 0.90;
           const haloR = isSelected ? 3.2 : isHovered ? 2.9 : 2.6;
@@ -465,16 +602,7 @@ const CyberCityMapView = ({
 
               {shouldShowLabel(t.id) && (
                 <g filter="url(#textShadow)" pointerEvents="none">
-                  <rect
-                    x={p.x - 13}
-                    y={p.y + 5.3}
-                    width={26}
-                    height={9.0}
-                    rx={4.5}
-                    fill="url(#labelBg)"
-                    stroke="rgba(255,255,255,0.10)"
-                    strokeWidth={0.3}
-                  />
+                  <rect x={p.x - 13} y={p.y + 5.3} width={26} height={9.0} rx={4.5} fill="url(#labelBg)" stroke="rgba(255,255,255,0.10)" strokeWidth={0.3} />
                   <text
                     x={p.x}
                     y={p.y + 8.7}
@@ -523,7 +651,7 @@ const GridView = ({
 }) => (
   <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: "5px" }}>
     {territories.map((t) => {
-      const owner = t.currentOwner ? (FACTIONS as any)[t.currentOwner] : null;
+      const owner = t.currentOwner ? FACTIONS[t.currentOwner] : null;
       const sel = selectedTerritoryId === t.id;
       const bgColor = owner ? owner.color : "#666";
       const bgColorDark = owner ? owner.colorDark : "#444";
@@ -573,7 +701,7 @@ const GridView = ({
               p > 0 ? (
                 <div key={f} style={{ display: "flex", alignItems: "center", gap: "2px" }}>
                   <div style={{ height: "3px", borderRadius: "1.5px", background: (FACTIONS as any)[f].color, width: `${p}%`, minWidth: "3px", transition: "width 0.4s" }} />
-                  <span style={{ fontSize: "7px", color: "#666", fontFamily: "Inter, system-ui, sans-serif" }}>{p.toFixed(0)}%</span>
+                  <span style={{ fontSize: "7px", color: "#666", fontFamily: "Inter, system-ui, sans-serif" }}>{Number(p).toFixed(0)}%</span>
                 </div>
               ) : null
             )}
@@ -585,10 +713,10 @@ const GridView = ({
 );
 
 export default function TurfWarzPreview() {
-  const [territories, setTerritories] = useState<any[]>(() => initTerritories());
+  const [territories, setTerritories] = useState(() => initTerritories());
   const [selectedFaction, setSelectedFaction] = useState<string | null>(null);
   const [selectedTerritoryId, setSelectedTerritoryId] = useState<number | null>(null);
-  const [viewMode, setViewMode] = useState<"grid" | "map">("map");
+  const [viewMode, setViewMode] = useState<"map" | "grid">("map");
   const [activityLog, setActivityLog] = useState<any[]>([]);
 
   // Preview controls
@@ -608,20 +736,21 @@ export default function TurfWarzPreview() {
         const updated = prev.map((t) => ({ ...t, transactions: { ...t.transactions }, control: { ...t.control } }));
 
         const idx = Math.floor(Math.random() * updated.length);
-        const faction = Object.keys(FACTIONS)[Math.floor(Math.random() * 3)];
+        const faction = Object.keys(FACTIONS)[Math.floor(Math.random() * 3)] as keyof typeof FACTIONS;
 
         updated[idx].transactions[faction] = updated[idx].transactions[faction] + 1;
 
-        const total = Object.values(updated[idx].transactions).reduce((a: number, b: any) => a + b, 0);
-        Object.keys(FACTIONS).forEach((f) => {
+        const total = Object.values(updated[idx].transactions).reduce((a: number, b: any) => a + Number(b), 0);
+        (Object.keys(FACTIONS) as (keyof typeof FACTIONS)[]).forEach((f) => {
           updated[idx].control[f] = (updated[idx].transactions[f] / total) * 100;
         });
 
         const max = Math.max(...Object.values(updated[idx].control));
-        const newOwner = Object.entries(updated[idx].control).find(([_, v]: any) => v === max)?.[0] || null;
+        const newOwner = (Object.entries(updated[idx].control).find(([_, v]: any) => v === max)?.[0] as keyof typeof FACTIONS) || null;
         const oldOwner = updated[idx].currentOwner;
 
         if (newOwner && max > 50) updated[idx].currentOwner = newOwner;
+
         updated[idx].isContested = max < 55 && total > 5;
 
         if (newOwner !== oldOwner && max > 50) {
@@ -635,7 +764,7 @@ export default function TurfWarzPreview() {
     return () => clearInterval(interval);
   }, [simulate, tickMs]);
 
-  const getStats = (id: string) => {
+  const getStats = (id: keyof typeof FACTIONS) => {
     const count = territories.filter((t) => t.currentOwner === id).length;
     const pct = ((count / 15) * 100).toFixed(1);
     return { count, pct };
@@ -647,19 +776,20 @@ export default function TurfWarzPreview() {
     setTerritories((prev) => {
       const updated = prev.map((t) => ({ ...t, transactions: { ...t.transactions }, control: { ...t.control } }));
 
-      const pickId = selectedTerritoryId || updated.find((t) => t.isContested)?.id || updated[Math.floor(Math.random() * 15)].id;
+      const pickId =
+        selectedTerritoryId || updated.find((t) => t.isContested)?.id || updated[Math.floor(Math.random() * 15)].id;
       const idx = updated.findIndex((t) => t.id === pickId);
       if (idx < 0) return prev;
 
       updated[idx].transactions[selectedFaction] = updated[idx].transactions[selectedFaction] + 3;
 
-      const total = Object.values(updated[idx].transactions).reduce((a: number, b: any) => a + b, 0);
-      Object.keys(FACTIONS).forEach((f) => {
+      const total = Object.values(updated[idx].transactions).reduce((a: number, b: any) => a + Number(b), 0);
+      (Object.keys(FACTIONS) as (keyof typeof FACTIONS)[]).forEach((f) => {
         updated[idx].control[f] = (updated[idx].transactions[f] / total) * 100;
       });
 
       const max = Math.max(...Object.values(updated[idx].control));
-      const newOwner = Object.entries(updated[idx].control).find(([_, v]: any) => v === max)?.[0] || null;
+      const newOwner = (Object.entries(updated[idx].control).find(([_, v]: any) => v === max)?.[0] as keyof typeof FACTIONS) || null;
       const oldOwner = updated[idx].currentOwner;
 
       if (newOwner && max > 50) updated[idx].currentOwner = newOwner;
@@ -709,23 +839,9 @@ export default function TurfWarzPreview() {
         </div>
 
         {/* Preview Controls */}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            gap: "10px",
-            marginBottom: "12px",
-            padding: "10px",
-            borderRadius: "12px",
-            border: "1px solid rgba(255,255,255,0.08)",
-            background: "rgba(255,255,255,0.03)",
-          }}
-        >
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: "10px", marginBottom: "12px", padding: "10px", borderRadius: "12px", border: "1px solid rgba(255,255,255,0.08)", background: "rgba(255,255,255,0.03)" }}>
           <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
-            <div style={{ fontSize: "10px", fontWeight: 800, color: "rgba(255,255,255,0.60)", letterSpacing: "1px", fontFamily: "Space Grotesk, Inter, system-ui, sans-serif" }}>
-              PREVIEW
-            </div>
+            <div style={{ fontSize: "10px", fontWeight: 800, color: "rgba(255,255,255,0.60)", letterSpacing: "1px", fontFamily: "Space Grotesk, Inter, system-ui, sans-serif" }}>PREVIEW</div>
             <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
               <button
                 onClick={() => setSimulate((s) => !s)}
@@ -744,9 +860,7 @@ export default function TurfWarzPreview() {
                 {simulate ? "⏸ Pause sim" : "▶️ Resume sim"}
               </button>
               <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                <div style={{ fontSize: "10px", color: "rgba(255,255,255,0.50)", minWidth: 70, fontFamily: "Space Grotesk, Inter, system-ui, sans-serif" }}>
-                  Speed
-                </div>
+                <div style={{ fontSize: "10px", color: "rgba(255,255,255,0.50)", minWidth: 70, fontFamily: "Space Grotesk, Inter, system-ui, sans-serif" }}>Speed</div>
                 <input type="range" min={350} max={2200} step={50} value={tickMs} onChange={(e) => setTickMs(Number(e.target.value))} style={{ width: 140 }} />
                 <div style={{ fontSize: "10px", color: "rgba(255,255,255,0.50)", minWidth: 45, textAlign: "right", fontFamily: "Space Grotesk, Inter, system-ui, sans-serif" }}>
                   {tickMs}ms
@@ -780,7 +894,7 @@ export default function TurfWarzPreview() {
 
         {/* Faction Selection */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "8px", marginBottom: "12px" }}>
-          {Object.values(FACTIONS).map((f: any) => {
+          {(Object.values(FACTIONS) as any[]).map((f) => {
             const stats = getStats(f.id);
             const sel = selectedFaction === f.id;
             return (
@@ -801,9 +915,7 @@ export default function TurfWarzPreview() {
                   <span style={{ fontWeight: "800", color: "#fff", fontSize: "11px", fontFamily: "Space Grotesk, Inter, system-ui, sans-serif" }}>{f.name}</span>
                 </div>
                 <div style={{ fontSize: "22px", fontWeight: "900", color: "#fff" }}>{stats.pct}%</div>
-                <div style={{ fontSize: "9px", color: "rgba(255,255,255,0.45)", fontFamily: "Space Grotesk, Inter, system-ui, sans-serif" }}>
-                  {stats.count}/15 turf
-                </div>
+                <div style={{ fontSize: "9px", color: "rgba(255,255,255,0.45)", fontFamily: "Space Grotesk, Inter, system-ui, sans-serif" }}>{stats.count}/15 turf</div>
               </div>
             );
           })}
@@ -812,27 +924,14 @@ export default function TurfWarzPreview() {
         {/* Control Bar */}
         <div style={{ marginBottom: "12px" }}>
           <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>
-            <span style={{ fontSize: "10px", fontWeight: "800", color: "rgba(255,255,255,0.45)", letterSpacing: "1px", fontFamily: "Space Grotesk, Inter, system-ui, sans-serif" }}>
-              TURF CONTROL
-            </span>
+            <span style={{ fontSize: "10px", fontWeight: "800", color: "rgba(255,255,255,0.45)", letterSpacing: "1px", fontFamily: "Space Grotesk, Inter, system-ui, sans-serif" }}>TURF CONTROL</span>
             <span style={{ fontSize: "9px", color: "rgba(255,255,255,0.35)", fontFamily: "Space Grotesk, Inter, system-ui, sans-serif" }}>3 neutral zones</span>
           </div>
           <div style={{ height: "20px", borderRadius: "10px", overflow: "hidden", display: "flex", background: "rgba(0,0,0,0.5)" }}>
-            {Object.keys(FACTIONS).map((id) => {
+            {(Object.keys(FACTIONS) as (keyof typeof FACTIONS)[]).map((id) => {
               const pct = (territories.filter((t) => t.currentOwner === id).length / 15) * 100;
               return (
-                <div
-                  key={id}
-                  style={{
-                    width: `${pct}%`,
-                    height: "100%",
-                    background: `linear-gradient(135deg, ${(FACTIONS as any)[id].colorLight} 0%, ${(FACTIONS as any)[id].color} 100%)`,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    transition: "width 0.5s",
-                  }}
-                >
+                <div key={id} style={{ width: `${pct}%`, height: "100%", background: `linear-gradient(135deg, ${FACTIONS[id].colorLight} 0%, ${FACTIONS[id].color} 100%)`, display: "flex", alignItems: "center", justifyContent: "center", transition: "width 0.5s" }}>
                   {pct >= 15 && <span style={{ fontSize: "9px", fontWeight: "bold", color: id === "hyperliquid" ? "#000" : "#fff" }}>{pct.toFixed(0)}%</span>}
                 </div>
               );
@@ -850,9 +949,7 @@ export default function TurfWarzPreview() {
 
         {/* Map Header */}
         <div style={{ marginBottom: "8px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <span style={{ fontSize: "10px", fontWeight: "800", color: "rgba(255,255,255,0.45)", letterSpacing: "1px", fontFamily: "Space Grotesk, Inter, system-ui, sans-serif" }}>
-            THE CITY
-          </span>
+          <span style={{ fontSize: "10px", fontWeight: "800", color: "rgba(255,255,255,0.45)", letterSpacing: "1px", fontFamily: "Space Grotesk, Inter, system-ui, sans-serif" }}>THE CITY</span>
           <ViewToggle view={viewMode} onToggle={setViewMode} />
         </div>
 
@@ -865,22 +962,42 @@ export default function TurfWarzPreview() {
           )}
         </div>
 
+        {/* Activity Feed */}
+        {activityLog.length > 0 && (
+          <div style={{ marginBottom: "12px" }}>
+            <div style={{ fontSize: "10px", fontWeight: "800", color: "rgba(255,255,255,0.45)", letterSpacing: "1px", marginBottom: "6px", fontFamily: "Space Grotesk, Inter, system-ui, sans-serif" }}>RECENT FLIPS</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+              {activityLog.map((a, i) => (
+                <div key={i} style={{ fontSize: "10px", color: "rgba(255,255,255,0.55)", display: "flex", alignItems: "center", gap: "4px", padding: "6px 8px", background: "rgba(255,255,255,0.03)", borderRadius: "8px", flexWrap: "wrap" }}>
+                  <span style={{ color: (FACTIONS as any)[a.to].color, fontWeight: "800", fontFamily: "Space Grotesk, Inter, system-ui, sans-serif" }}>{(FACTIONS as any)[a.to].name}</span>
+                  <span>took</span>
+                  <span style={{ color: "#fff", fontWeight: "800", fontFamily: "Space Grotesk, Inter, system-ui, sans-serif" }}>{a.territory}</span>
+                  {a.from && (
+                    <>
+                      <span>from</span>
+                      <span style={{ color: (FACTIONS as any)[a.from]?.color || "#666", fontFamily: "Space Grotesk, Inter, system-ui, sans-serif" }}>{(FACTIONS as any)[a.from]?.name || "Neutral"}</span>
+                    </>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Territory Detail */}
         {selectedTerritory && (
           <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.10)", borderRadius: "12px", padding: "12px", marginBottom: "12px" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "start", marginBottom: "8px" }}>
               <div>
                 <div style={{ fontSize: "16px", fontWeight: "900", color: "#fff", fontFamily: "Space Grotesk, Inter, system-ui, sans-serif" }}>{selectedTerritory.name}</div>
-                <div style={{ fontSize: "10px", color: "rgba(255,255,255,0.45)", fontStyle: "italic", fontFamily: "Space Grotesk, Inter, system-ui, sans-serif" }}>
-                  "{selectedTerritory.vibe}"
-                </div>
+                <div style={{ fontSize: "10px", color: "rgba(255,255,255,0.45)", fontStyle: "italic", fontFamily: "Space Grotesk, Inter, system-ui, sans-serif" }}>&quot;{selectedTerritory.vibe}&quot;</div>
               </div>
               <button onClick={() => setSelectedTerritoryId(null)} style={{ background: "none", border: "none", color: "rgba(255,255,255,0.45)", fontSize: "18px", cursor: "pointer", padding: 0 }}>
                 ×
               </button>
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "8px" }}>
-              {Object.entries(FACTIONS).map(([id, f]: any) => (
+              {(Object.entries(FACTIONS) as any[]).map(([id, f]) => (
                 <div key={id} style={{ textAlign: "center", padding: "8px", background: `${f.color}11`, borderRadius: "10px", border: `1px solid ${f.color}33` }}>
                   <div style={{ fontSize: "16px", fontWeight: "900", color: f.color, fontFamily: "Orbitron, Inter, system-ui, sans-serif" }}>{selectedTerritory.control[id].toFixed(0)}%</div>
                   <div style={{ fontSize: "9px", color: "rgba(255,255,255,0.45)", fontFamily: "Space Grotesk, Inter, system-ui, sans-serif" }}>{f.name}</div>
@@ -902,7 +1019,7 @@ export default function TurfWarzPreview() {
               fontWeight: "900",
               fontSize: "14px",
               cursor: selectedFaction ? "pointer" : "not-allowed",
-              background: selectedFaction ? `linear-gradient(135deg, ${(FACTIONS as any)[selectedFaction].color} 0%, ${(FACTIONS as any)[selectedFaction].colorDark} 100%)` : "linear-gradient(135deg, rgba(255,255,255,0.08) 0%, rgba(0,0,0,0.55) 100%)",
+              background: selectedFaction ? `linear-gradient(135deg, ${FACTIONS[selectedFaction as keyof typeof FACTIONS].color} 0%, ${FACTIONS[selectedFaction as keyof typeof FACTIONS].colorDark} 100%)` : "linear-gradient(135deg, rgba(255,255,255,0.08) 0%, rgba(0,0,0,0.55) 100%)",
               color: selectedFaction === "hyperliquid" ? "#000" : "#fff",
               boxShadow: selectedFaction ? `0 8px 28px ${(FACTIONS as any)[selectedFaction].color}44` : "none",
               opacity: selectedFaction ? 1 : 0.6,
