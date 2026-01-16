@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 
 // Publicly available fonts via Google Fonts (no bundling required)
 const FONT_CSS = `
@@ -18,31 +18,13 @@ const FONT_CSS = `
 * { -webkit-tap-highlight-color: transparent; }
 `;
 
-type FactionId = "base" | "hyperliquid" | "monad";
-
-type TerritorySeed = {
-  id: number;
-  name: string;
-  startingOwner: FactionId | null;
-  vibe: string;
-  cx: number;
-  cy: number;
-};
-
-type Territory = TerritorySeed & {
-  currentOwner: FactionId | null;
-  control: Record<FactionId, number>;
-  transactions: Record<FactionId, number>;
-  isContested: boolean;
-};
-
-const FACTIONS: Record<FactionId, { id: FactionId; name: string; color: string; colorLight: string; colorDark: string }> = {
+const FACTIONS = {
   base: { id: "base", name: "Base", color: "#0052FF", colorLight: "#3373FF", colorDark: "#0041CC" },
   hyperliquid: { id: "hyperliquid", name: "Hyperliquid", color: "#3FEDC0", colorLight: "#6FF2D0", colorDark: "#2BC9A0" },
   monad: { id: "monad", name: "Monad", color: "#836EF9", colorLight: "#9D8BFA", colorDark: "#6B56E0" },
 };
 
-const TERRITORIES: TerritorySeed[] = [
+const TERRITORIES = [
   // MONAD - NORTH
   { id: 1, name: "The Rooftop", startingOwner: "monad", vibe: "Top of the world", cx: 50, cy: 12 },
   { id: 2, name: "Mural Wall", startingOwner: "monad", vibe: "Art district", cx: 22, cy: 28 },
@@ -67,7 +49,7 @@ const TERRITORIES: TerritorySeed[] = [
   { id: 15, name: "East Central", startingOwner: null, vibe: "Eastern gateway", cx: 62, cy: 68 },
 ];
 
-const initTerritories = (): Territory[] =>
+const initTerritories = () =>
   TERRITORIES.map((t) => ({
     ...t,
     currentOwner: t.startingOwner,
@@ -84,6 +66,7 @@ const initTerritories = (): Territory[] =>
     isContested: t.startingOwner === null,
   }));
 
+// View Toggle
 const ViewToggle = ({ view, onToggle }: { view: "grid" | "map"; onToggle: (v: "grid" | "map") => void }) => (
   <div style={{ display: "flex", background: "rgba(255,255,255,0.05)", borderRadius: "8px", padding: "3px", gap: "2px" }}>
     <button
@@ -121,164 +104,13 @@ const ViewToggle = ({ view, onToggle }: { view: "grid" | "map"; onToggle: (v: "g
   </div>
 );
 
-// --- Liquid aura (winner-take-all so colors "clash" instead of mixing) ---
-const hexToRgb = (hex: string) => {
-  const h = hex.replace("#", "");
-  const full = h.length === 3 ? h.split("").map((c) => c + c).join("") : h;
-  const n = parseInt(full, 16);
-  return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
-};
-
-const LiquidAura = ({
-  territories,
-  districtW,
-  districtH,
-  getPoint,
-  quality = 260,
-}: {
-  territories: Territory[];
-  districtW: number;
-  districtH: number;
-  quality?: number;
-  getPoint: (t: Territory) => { x: number; y: number };
-}) => {
-  const ref = useRef<HTMLCanvasElement | null>(null);
-  const [tick, setTick] = useState(0);
-
-  useEffect(() => {
-    const id = window.setInterval(() => setTick((x) => x + 1), 120);
-    return () => window.clearInterval(id);
-  }, []);
-
-  useEffect(() => {
-    const canvas = ref.current;
-    if (!canvas) return;
-
-    const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
-    const W = Math.floor(quality * dpr);
-    const H = Math.floor(quality * dpr);
-    canvas.width = W;
-    canvas.height = H;
-
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-
-    const img = ctx.createImageData(W, H);
-    const data = img.data;
-
-    const colors = {
-      base: hexToRgb(FACTIONS.base.color),
-      hyperliquid: hexToRgb(FACTIONS.hyperliquid.color),
-      monad: hexToRgb(FACTIONS.monad.color),
-      neutral: { r: 150, g: 150, b: 150 },
-    };
-
-    const pts = territories.map((tt) => {
-      const p = getPoint(tt);
-      return {
-        x: p.x / districtW,
-        y: p.y / districtH,
-        owner: tt.currentOwner,
-        control: tt.control,
-      };
-    });
-
-    const sigma = 0.18;
-    const inv2s2 = 1 / (2 * sigma * sigma);
-
-    const noise = (x: number, y: number, t: number) => {
-      const a = Math.sin(x * 8.3 + t * 0.13) + Math.cos(y * 7.1 - t * 0.11);
-      const b = Math.sin((x + y) * 5.7 + t * 0.09);
-      return (a + b) / 3;
-    };
-
-    for (let j = 0; j < H; j++) {
-      const y0 = j / (H - 1);
-      for (let i = 0; i < W; i++) {
-        const x0 = i / (W - 1);
-
-        // flow warp for liquid motion
-        const n = noise(x0, y0, tick);
-        const x = x0 + n * 0.012;
-        const y = y0 + noise(y0, x0, tick + 7) * 0.012;
-
-        let sBase = 0,
-          sHyper = 0,
-          sMonad = 0,
-          sNeutral = 0;
-
-        for (const p of pts) {
-          const dx = x - p.x;
-          const dy = y - p.y;
-          const w = Math.exp(-(dx * dx + dy * dy) * inv2s2);
-
-          sBase += w * (p.control.base / 100);
-          sHyper += w * (p.control.hyperliquid / 100);
-          sMonad += w * (p.control.monad / 100);
-          if (!p.owner) sNeutral += w * 0.22;
-        }
-
-        // winner-take-all => NO mixing
-        let winner: keyof typeof colors = "neutral";
-        let max = sNeutral;
-        if (sBase > max) {
-          max = sBase;
-          winner = "base";
-        }
-        if (sHyper > max) {
-          max = sHyper;
-          winner = "hyperliquid";
-        }
-        if (sMonad > max) {
-          max = sMonad;
-          winner = "monad";
-        }
-
-        let a = Math.min(1, max * 1.15);
-        a = Math.max(0, a - 0.08);
-
-        // clash shimmer near borders
-        const edge = Math.abs(sBase - sHyper) + Math.abs(sHyper - sMonad) + Math.abs(sMonad - sBase);
-        a = Math.min(1, a + Math.min(0.22, edge * 0.12));
-
-        const idx = (j * W + i) * 4;
-        if (a < 0.04) {
-          data[idx + 3] = 0;
-          continue;
-        }
-
-        const c = colors[winner];
-        data[idx + 0] = c.r;
-        data[idx + 1] = c.g;
-        data[idx + 2] = c.b;
-        data[idx + 3] = Math.floor(255 * (0.55 * a));
-      }
-    }
-
-    ctx.putImageData(img, 0, 0);
-  }, [territories, districtW, districtH, getPoint, quality, tick]);
-
-  return (
-    <canvas
-      ref={ref}
-      style={{
-        width: "100%",
-        height: "100%",
-        borderRadius: "12px",
-        filter: "blur(6px) saturate(1.25) brightness(1.10)",
-        opacity: 0.98,
-      }}
-    />
-  );
-};
-
 // Cyber Neon City Map View (playable district in the center)
 const CyberCityMapView = ({
   territories,
   selectedTerritoryId,
   onSelectTerritoryId,
 }: {
-  territories: Territory[];
+  territories: any[];
   selectedTerritoryId: number | null;
   onSelectTerritoryId: (id: number | null) => void;
 }) => {
@@ -294,9 +126,9 @@ const CyberCityMapView = ({
 
   const shouldShowLabel = (id: number) => id === selectedTerritoryId || id === hoveredId;
 
-  const toDistrict = (t: Territory) => {
-    // tighter cluster
-    const inset = 8;
+  const toDistrict = (t: any) => {
+    // tighter playfield
+    const inset = 6;
     const w = Math.max(1, DISTRICT.w - inset * 2);
     const h = Math.max(1, DISTRICT.h - inset * 2);
     return {
@@ -312,12 +144,15 @@ const CyberCityMapView = ({
   };
 
   const buildings = useMemo(() => {
-    const out: Array<{ x: number; y: number; w: number; h: number; rx: number; o: number; neon: boolean; neonHue: string }> = [];
+    const out: any[] = [];
     const step = 4;
     for (let gy = 2; gy < 98; gy += step) {
       for (let gx = 2; gx < 98; gx += step) {
         const insideDistrict =
-          gx > DISTRICT.x - 2 && gx < DISTRICT.x + DISTRICT.w + 2 && gy > DISTRICT.y - 2 && gy < DISTRICT.y + DISTRICT.h + 2;
+          gx > DISTRICT.x - 2 &&
+          gx < DISTRICT.x + DISTRICT.w + 2 &&
+          gy > DISTRICT.y - 2 &&
+          gy < DISTRICT.y + DISTRICT.h + 2;
         if (insideDistrict) continue;
 
         const r = hash01(gx, gy);
@@ -358,7 +193,7 @@ const CyberCityMapView = ({
         boxShadow: "0 10px 35px rgba(0,0,0,0.55)",
       }}
     >
-      <svg viewBox="0 0 100 100" style={{ width: "100%", height: "100%" }}>
+      <svg viewBox="0 0 100 100" style={{ width: "100%", height: "100%", touchAction: "none" }}>
         <defs>
           <pattern id="cityGrid" width="6" height="6" patternUnits="userSpaceOnUse">
             <path d="M 6 0 L 0 0 0 6" fill="none" stroke="#121225" strokeWidth="0.35" />
@@ -394,16 +229,9 @@ const CyberCityMapView = ({
             <feDropShadow dx="0" dy="0" stdDeviation="2.3" floodColor="#ffffff" floodOpacity="0.22" />
           </filter>
 
-          <linearGradient id="labelBg" x1="0" x2="1" y1="0" y2="1">
-            <stop offset="0%" stopColor="rgba(0,0,0,0.78)" />
-            <stop offset="100%" stopColor="rgba(0,0,0,0.40)" />
-          </linearGradient>
-
-          <linearGradient id="districtStroke" x1="0" x2="1" y1="0" y2="1">
-            <stop offset="0%" stopColor="rgba(56,189,248,0.95)" />
-            <stop offset="50%" stopColor="rgba(167,139,250,0.95)" />
-            <stop offset="100%" stopColor="rgba(34,211,238,0.95)" />
-          </linearGradient>
+          <clipPath id="districtClip">
+            <rect x={DISTRICT.x} y={DISTRICT.y} width={DISTRICT.w} height={DISTRICT.h} rx={DISTRICT.r} />
+          </clipPath>
 
           {/* Ambient faction lighting */}
           <radialGradient id="ambientMonad" cx="50%" cy="0%" r="85%">
@@ -421,6 +249,41 @@ const CyberCityMapView = ({
             <stop offset="65%" stopColor={FACTIONS.hyperliquid.color} stopOpacity="0.12" />
             <stop offset="100%" stopColor="#000" stopOpacity="0" />
           </radialGradient>
+
+          {/* Territory influence gradients as neon spill */}
+          {territories.map((t) => {
+            const owner = t.currentOwner ? (FACTIONS as any)[t.currentOwner] : null;
+            const dominance = t.currentOwner ? t.control[t.currentOwner] / 100 : 0;
+
+            if (!t.currentOwner) {
+              return (
+                <radialGradient key={`grad-${t.id}`} id={`territoryGrad-${t.id}`} cx="50%" cy="50%" r="100%">
+                  <stop offset="0%" stopColor="#a3a3a3" stopOpacity={0.26} />
+                  <stop offset="55%" stopColor="#6b6b6b" stopOpacity={0.10} />
+                  <stop offset="100%" stopColor="#2b2b2b" stopOpacity={0} />
+                </radialGradient>
+              );
+            }
+
+            return (
+              <radialGradient key={`grad-${t.id}`} id={`territoryGrad-${t.id}`} cx="50%" cy="50%" r="100%">
+                <stop offset="0%" stopColor={owner?.color || "#666"} stopOpacity={0.70 * dominance} />
+                <stop offset="45%" stopColor={owner?.color || "#444"} stopOpacity={0.22 * dominance} />
+                <stop offset="100%" stopColor={owner?.color || "#222"} stopOpacity={0} />
+              </radialGradient>
+            );
+          })}
+
+          <linearGradient id="labelBg" x1="0" x2="1" y1="0" y2="1">
+            <stop offset="0%" stopColor="rgba(0,0,0,0.78)" />
+            <stop offset="100%" stopColor="rgba(0,0,0,0.40)" />
+          </linearGradient>
+
+          <linearGradient id="districtStroke" x1="0" x2="1" y1="0" y2="1">
+            <stop offset="0%" stopColor="rgba(56,189,248,0.95)" />
+            <stop offset="50%" stopColor="rgba(167,139,250,0.95)" />
+            <stop offset="100%" stopColor="rgba(34,211,238,0.95)" />
+          </linearGradient>
         </defs>
 
         {/* Base background */}
@@ -432,9 +295,9 @@ const CyberCityMapView = ({
         <rect width="100" height="100" fill="url(#ambientBase)" style={{ mixBlendMode: "screen" }} />
         <rect width="100" height="100" fill="url(#ambientHyper)" style={{ mixBlendMode: "screen" }} />
 
-        {/* Buildings (outside district) */}
+        {/* Buildings (outside district) — visual only */}
         {buildings.map((b, i) => (
-          <g key={i}>
+          <g key={i} pointerEvents="none">
             <rect x={b.x} y={b.y} width={b.w} height={b.h} rx={b.rx} fill="rgba(255,255,255,0.10)" opacity={b.o} />
             {b.neon && (
               <rect
@@ -462,61 +325,62 @@ const CyberCityMapView = ({
           stroke="url(#districtStroke)"
           strokeWidth={0.8}
           filter="url(#neonGlow)"
+          pointerEvents="none"
         />
 
         {/* District content */}
-        <g>
-          <rect x={DISTRICT.x} y={DISTRICT.y} width={DISTRICT.w} height={DISTRICT.h} rx={DISTRICT.r} fill="url(#districtGrid)" opacity={0.65} />
+        <g clipPath="url(#districtClip)">
+          <rect x={DISTRICT.x} y={DISTRICT.y} width={DISTRICT.w} height={DISTRICT.h} fill="url(#districtGrid)" opacity={0.65} pointerEvents="none" />
 
           {/* Roads */}
           <path
             d={`M ${DISTRICT.x} ${DISTRICT.y + DISTRICT.h * 0.55} L ${DISTRICT.x + DISTRICT.w} ${DISTRICT.y + DISTRICT.h * 0.35}`}
             stroke="rgba(56,189,248,0.22)"
             strokeWidth="1.6"
+            pointerEvents="none"
           />
           <path
             d={`M ${DISTRICT.x + DISTRICT.w * 0.25} ${DISTRICT.y} L ${DISTRICT.x + DISTRICT.w * 0.45} ${DISTRICT.y + DISTRICT.h}`}
             stroke="rgba(167,139,250,0.18)"
             strokeWidth="1.4"
+            pointerEvents="none"
           />
           <path
             d={`M ${DISTRICT.x + DISTRICT.w * 0.72} ${DISTRICT.y} L ${DISTRICT.x + DISTRICT.w * 0.58} ${DISTRICT.y + DISTRICT.h}`}
             stroke="rgba(34,211,238,0.14)"
             strokeWidth="1.2"
+            pointerEvents="none"
           />
 
-          {/* LIQUID AURA (no mixing) */}
-          <foreignObject x={DISTRICT.x} y={DISTRICT.y} width={DISTRICT.w} height={DISTRICT.h}>
-            <div
-              xmlns="http://www.w3.org/1999/xhtml"
-              style={{
-                width: "100%",
-                height: "100%",
-                borderRadius: `${DISTRICT.r}px`,
-                overflow: "hidden",
-              }}
-            >
-              <LiquidAura
-                territories={territories}
-                districtW={DISTRICT.w}
-                districtH={DISTRICT.h}
-                quality={260}
-                getPoint={(tt) => {
-                  const p = toDistrict(tt);
-                  return { x: p.x - DISTRICT.x, y: p.y - DISTRICT.y };
-                }}
+          {/* Influence as neon spill (visual only) */}
+          {territories.map((t) => {
+            const p = toDistrict(t);
+            const dominance = t.currentOwner ? t.control[t.currentOwner] / 100 : 0.3;
+            const radius = 10 + dominance * 9;
+            return (
+              <ellipse
+                key={`spill-${t.id}`}
+                cx={p.x}
+                cy={p.y}
+                rx={radius}
+                ry={radius * 0.78}
+                fill={`url(#territoryGrad-${t.id})`}
+                style={{ mixBlendMode: "screen" }}
+                pointerEvents="none"
               />
-              {/* slight vignette */}
-              <div
-                style={{
-                  position: "absolute",
-                  inset: 0,
-                  background: "radial-gradient(80% 80% at 50% 45%, rgba(0,0,0,0) 0%, rgba(0,0,0,0.28) 70%, rgba(0,0,0,0.55) 100%)",
-                  pointerEvents: "none",
-                }}
-              />
-            </div>
-          </foreignObject>
+            );
+          })}
+
+          {/* Inner vignette */}
+          <rect
+            x={DISTRICT.x}
+            y={DISTRICT.y}
+            width={DISTRICT.w}
+            height={DISTRICT.h}
+            fill="rgba(0,0,0,0.28)"
+            style={{ mixBlendMode: "multiply" }}
+            pointerEvents="none"
+          />
         </g>
 
         {/* District edge highlight */}
@@ -529,24 +393,26 @@ const CyberCityMapView = ({
           fill="none"
           stroke="rgba(255,255,255,0.06)"
           strokeWidth={0.6}
+          pointerEvents="none"
         />
 
-        {/* Markers (pins only — no extra circles) */}
+        {/* Markers (pins only — interactive) */}
         {territories.map((t) => {
           const p = toDistrict(t);
-          const owner = t.currentOwner ? FACTIONS[t.currentOwner] : null;
+          const owner = t.currentOwner ? (FACTIONS as any)[t.currentOwner] : null;
 
           const isSelected = selectedTerritory?.id === t.id;
           const isHovered = hoveredId === t.id;
           const isPressed = pressedId === t.id;
 
-          // Pins only; aura handles ownership. Contesteds get amber pins.
+          const dominance = t.currentOwner ? Math.max(...Object.values(t.control)) : 33;
+
+          // contested/neutral styling
           const markerColor = owner ? owner.color : t.isContested ? "#FBBF24" : "#b8b8b8";
 
-          const dominance = t.currentOwner ? Math.max(...Object.values(t.control)) : 33;
-          const scale = isPressed ? 0.95 : isSelected ? 1.03 : isHovered ? 1.02 : 1;
+          const scale = isPressed ? 0.92 : isSelected ? 1.04 : isHovered ? 1.03 : 1;
 
-          // Smaller, snappier pins
+          // Smaller pin sizing
           const pinScale = isSelected ? 0.30 : isHovered ? 0.28 : 0.26;
           const headR = isSelected ? 1.05 : isHovered ? 0.98 : 0.90;
           const haloR = isSelected ? 3.2 : isHovered ? 2.9 : 2.6;
@@ -598,7 +464,7 @@ const CyberCityMapView = ({
               <circle cx={p.x} cy={p.y - 0.9} r={Math.max(0.42, headR * 0.38)} fill="#fff" opacity={0.65} />
 
               {shouldShowLabel(t.id) && (
-                <g filter="url(#textShadow)">
+                <g filter="url(#textShadow)" pointerEvents="none">
                   <rect
                     x={p.x - 13}
                     y={p.y + 5.3}
@@ -637,26 +503,27 @@ const CyberCityMapView = ({
           );
         })}
 
-        {/* Overlays */}
-        <rect width="100" height="100" fill="url(#scanlines)" opacity="0.55" />
-        <rect width="100" height="100" filter="url(#noise)" opacity="0.20" />
+        {/* Overlays (visual only — MUST NOT block pins) */}
+        <rect width="100" height="100" fill="url(#scanlines)" opacity="0.55" pointerEvents="none" />
+        <rect width="100" height="100" filter="url(#noise)" opacity="0.20" pointerEvents="none" />
       </svg>
     </div>
   );
 };
 
+// Grid View
 const GridView = ({
   territories,
   selectedTerritoryId,
   onSelectTerritoryId,
 }: {
-  territories: Territory[];
+  territories: any[];
   selectedTerritoryId: number | null;
   onSelectTerritoryId: (id: number | null) => void;
 }) => (
   <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: "5px" }}>
     {territories.map((t) => {
-      const owner = t.currentOwner ? FACTIONS[t.currentOwner] : null;
+      const owner = t.currentOwner ? (FACTIONS as any)[t.currentOwner] : null;
       const sel = selectedTerritoryId === t.id;
       const bgColor = owner ? owner.color : "#666";
       const bgColorDark = owner ? owner.colorDark : "#444";
@@ -702,10 +569,10 @@ const GridView = ({
             {owner ? owner.name : "Neutral"}
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: "2px" }}>
-            {Object.entries(t.control).map(([f, p]) =>
+            {Object.entries(t.control).map(([f, p]: any) =>
               p > 0 ? (
                 <div key={f} style={{ display: "flex", alignItems: "center", gap: "2px" }}>
-                  <div style={{ height: "3px", borderRadius: "1.5px", background: FACTIONS[f as FactionId].color, width: `${p}%`, minWidth: "3px", transition: "width 0.4s" }} />
+                  <div style={{ height: "3px", borderRadius: "1.5px", background: (FACTIONS as any)[f].color, width: `${p}%`, minWidth: "3px", transition: "width 0.4s" }} />
                   <span style={{ fontSize: "7px", color: "#666", fontFamily: "Inter, system-ui, sans-serif" }}>{p.toFixed(0)}%</span>
                 </div>
               ) : null
@@ -717,12 +584,12 @@ const GridView = ({
   </div>
 );
 
-export default function App() {
-  const [territories, setTerritories] = useState<Territory[]>(() => initTerritories());
-  const [selectedFaction, setSelectedFaction] = useState<FactionId | null>(null);
+export default function TurfWarzPreview() {
+  const [territories, setTerritories] = useState<any[]>(() => initTerritories());
+  const [selectedFaction, setSelectedFaction] = useState<string | null>(null);
   const [selectedTerritoryId, setSelectedTerritoryId] = useState<number | null>(null);
   const [viewMode, setViewMode] = useState<"grid" | "map">("map");
-  const [activityLog, setActivityLog] = useState<Array<{ territory: string; from: FactionId | null; to: FactionId; time: number }>>([]);
+  const [activityLog, setActivityLog] = useState<any[]>([]);
 
   // Preview controls
   const [simulate, setSimulate] = useState(true);
@@ -736,28 +603,28 @@ export default function App() {
   useEffect(() => {
     if (!simulate) return;
 
-    const interval = window.setInterval(() => {
+    const interval = setInterval(() => {
       setTerritories((prev) => {
         const updated = prev.map((t) => ({ ...t, transactions: { ...t.transactions }, control: { ...t.control } }));
 
         const idx = Math.floor(Math.random() * updated.length);
-        const faction = (Object.keys(FACTIONS)[Math.floor(Math.random() * 3)] as FactionId) || "base";
+        const faction = Object.keys(FACTIONS)[Math.floor(Math.random() * 3)];
 
         updated[idx].transactions[faction] = updated[idx].transactions[faction] + 1;
 
-        const total = Object.values(updated[idx].transactions).reduce((a, b) => a + b, 0);
-        (Object.keys(FACTIONS) as FactionId[]).forEach((f) => {
+        const total = Object.values(updated[idx].transactions).reduce((a: number, b: any) => a + b, 0);
+        Object.keys(FACTIONS).forEach((f) => {
           updated[idx].control[f] = (updated[idx].transactions[f] / total) * 100;
         });
 
         const max = Math.max(...Object.values(updated[idx].control));
-        const newOwner = (Object.entries(updated[idx].control).find(([_, v]) => v === max)?.[0] as FactionId) || null;
+        const newOwner = Object.entries(updated[idx].control).find(([_, v]: any) => v === max)?.[0] || null;
         const oldOwner = updated[idx].currentOwner;
 
         if (newOwner && max > 50) updated[idx].currentOwner = newOwner;
         updated[idx].isContested = max < 55 && total > 5;
 
-        if (newOwner !== oldOwner && newOwner && max > 50) {
+        if (newOwner !== oldOwner && max > 50) {
           setActivityLog((l) => [{ territory: updated[idx].name, from: oldOwner, to: newOwner, time: Date.now() }, ...l].slice(0, 5));
         }
 
@@ -765,10 +632,10 @@ export default function App() {
       });
     }, tickMs);
 
-    return () => window.clearInterval(interval);
+    return () => clearInterval(interval);
   }, [simulate, tickMs]);
 
-  const getStats = (id: FactionId) => {
+  const getStats = (id: string) => {
     const count = territories.filter((t) => t.currentOwner === id).length;
     const pct = ((count / 15) * 100).toFixed(1);
     return { count, pct };
@@ -786,19 +653,19 @@ export default function App() {
 
       updated[idx].transactions[selectedFaction] = updated[idx].transactions[selectedFaction] + 3;
 
-      const total = Object.values(updated[idx].transactions).reduce((a, b) => a + b, 0);
-      (Object.keys(FACTIONS) as FactionId[]).forEach((f) => {
+      const total = Object.values(updated[idx].transactions).reduce((a: number, b: any) => a + b, 0);
+      Object.keys(FACTIONS).forEach((f) => {
         updated[idx].control[f] = (updated[idx].transactions[f] / total) * 100;
       });
 
       const max = Math.max(...Object.values(updated[idx].control));
-      const newOwner = (Object.entries(updated[idx].control).find(([_, v]) => v === max)?.[0] as FactionId) || null;
+      const newOwner = Object.entries(updated[idx].control).find(([_, v]: any) => v === max)?.[0] || null;
       const oldOwner = updated[idx].currentOwner;
 
       if (newOwner && max > 50) updated[idx].currentOwner = newOwner;
       updated[idx].isContested = max < 55 && total > 5;
 
-      if (newOwner !== oldOwner && newOwner && max > 50) {
+      if (newOwner !== oldOwner && max > 50) {
         setActivityLog((l) => [{ territory: updated[idx].name, from: oldOwner, to: newOwner, time: Date.now() }, ...l].slice(0, 5));
       }
 
@@ -809,7 +676,6 @@ export default function App() {
   return (
     <>
       <style>{FONT_CSS}</style>
-
       <div
         style={{
           minHeight: "100vh",
@@ -878,7 +744,9 @@ export default function App() {
                 {simulate ? "⏸ Pause sim" : "▶️ Resume sim"}
               </button>
               <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                <div style={{ fontSize: "10px", color: "rgba(255,255,255,0.50)", minWidth: 70, fontFamily: "Space Grotesk, Inter, system-ui, sans-serif" }}>Speed</div>
+                <div style={{ fontSize: "10px", color: "rgba(255,255,255,0.50)", minWidth: 70, fontFamily: "Space Grotesk, Inter, system-ui, sans-serif" }}>
+                  Speed
+                </div>
                 <input type="range" min={350} max={2200} step={50} value={tickMs} onChange={(e) => setTickMs(Number(e.target.value))} style={{ width: 140 }} />
                 <div style={{ fontSize: "10px", color: "rgba(255,255,255,0.50)", minWidth: 45, textAlign: "right", fontFamily: "Space Grotesk, Inter, system-ui, sans-serif" }}>
                   {tickMs}ms
@@ -912,7 +780,7 @@ export default function App() {
 
         {/* Faction Selection */}
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "8px", marginBottom: "12px" }}>
-          {(Object.values(FACTIONS) as Array<(typeof FACTIONS)[FactionId]>).map((f) => {
+          {Object.values(FACTIONS).map((f: any) => {
             const stats = getStats(f.id);
             const sel = selectedFaction === f.id;
             return (
@@ -950,7 +818,7 @@ export default function App() {
             <span style={{ fontSize: "9px", color: "rgba(255,255,255,0.35)", fontFamily: "Space Grotesk, Inter, system-ui, sans-serif" }}>3 neutral zones</span>
           </div>
           <div style={{ height: "20px", borderRadius: "10px", overflow: "hidden", display: "flex", background: "rgba(0,0,0,0.5)" }}>
-            {(Object.keys(FACTIONS) as FactionId[]).map((id) => {
+            {Object.keys(FACTIONS).map((id) => {
               const pct = (territories.filter((t) => t.currentOwner === id).length / 15) * 100;
               return (
                 <div
@@ -958,7 +826,7 @@ export default function App() {
                   style={{
                     width: `${pct}%`,
                     height: "100%",
-                    background: `linear-gradient(135deg, ${FACTIONS[id].colorLight} 0%, ${FACTIONS[id].color} 100%)`,
+                    background: `linear-gradient(135deg, ${(FACTIONS as any)[id].colorLight} 0%, ${(FACTIONS as any)[id].color} 100%)`,
                     display: "flex",
                     alignItems: "center",
                     justifyContent: "center",
@@ -997,30 +865,6 @@ export default function App() {
           )}
         </div>
 
-        {/* Activity Feed */}
-        {activityLog.length > 0 && (
-          <div style={{ marginBottom: "12px" }}>
-            <div style={{ fontSize: "10px", fontWeight: "800", color: "rgba(255,255,255,0.45)", letterSpacing: "1px", marginBottom: "6px", fontFamily: "Space Grotesk, Inter, system-ui, sans-serif" }}>
-              RECENT FLIPS
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
-              {activityLog.map((a, i) => (
-                <div key={i} style={{ fontSize: "10px", color: "rgba(255,255,255,0.55)", display: "flex", alignItems: "center", gap: "4px", padding: "6px 8px", background: "rgba(255,255,255,0.03)", borderRadius: "8px", flexWrap: "wrap" }}>
-                  <span style={{ color: FACTIONS[a.to].color, fontWeight: "800", fontFamily: "Space Grotesk, Inter, system-ui, sans-serif" }}>{FACTIONS[a.to].name}</span>
-                  <span>took</span>
-                  <span style={{ color: "#fff", fontWeight: "800", fontFamily: "Space Grotesk, Inter, system-ui, sans-serif" }}>{a.territory}</span>
-                  {a.from && (
-                    <>
-                      <span>from</span>
-                      <span style={{ color: FACTIONS[a.from]?.color || "#666", fontFamily: "Space Grotesk, Inter, system-ui, sans-serif" }}>{FACTIONS[a.from]?.name || "Neutral"}</span>
-                    </>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
         {/* Territory Detail */}
         {selectedTerritory && (
           <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.10)", borderRadius: "12px", padding: "12px", marginBottom: "12px" }}>
@@ -1036,7 +880,7 @@ export default function App() {
               </button>
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "8px" }}>
-              {(Object.entries(FACTIONS) as Array<[FactionId, (typeof FACTIONS)[FactionId]]>).map(([id, f]) => (
+              {Object.entries(FACTIONS).map(([id, f]: any) => (
                 <div key={id} style={{ textAlign: "center", padding: "8px", background: `${f.color}11`, borderRadius: "10px", border: `1px solid ${f.color}33` }}>
                   <div style={{ fontSize: "16px", fontWeight: "900", color: f.color, fontFamily: "Orbitron, Inter, system-ui, sans-serif" }}>{selectedTerritory.control[id].toFixed(0)}%</div>
                   <div style={{ fontSize: "9px", color: "rgba(255,255,255,0.45)", fontFamily: "Space Grotesk, Inter, system-ui, sans-serif" }}>{f.name}</div>
@@ -1058,14 +902,14 @@ export default function App() {
               fontWeight: "900",
               fontSize: "14px",
               cursor: selectedFaction ? "pointer" : "not-allowed",
-              background: selectedFaction ? `linear-gradient(135deg, ${FACTIONS[selectedFaction].color} 0%, ${FACTIONS[selectedFaction].colorDark} 100%)` : "linear-gradient(135deg, rgba(255,255,255,0.08) 0%, rgba(0,0,0,0.55) 100%)",
+              background: selectedFaction ? `linear-gradient(135deg, ${(FACTIONS as any)[selectedFaction].color} 0%, ${(FACTIONS as any)[selectedFaction].colorDark} 100%)` : "linear-gradient(135deg, rgba(255,255,255,0.08) 0%, rgba(0,0,0,0.55) 100%)",
               color: selectedFaction === "hyperliquid" ? "#000" : "#fff",
-              boxShadow: selectedFaction ? `0 8px 28px ${FACTIONS[selectedFaction].color}44` : "none",
+              boxShadow: selectedFaction ? `0 8px 28px ${(FACTIONS as any)[selectedFaction].color}44` : "none",
               opacity: selectedFaction ? 1 : 0.6,
               fontFamily: "Orbitron, Inter, system-ui, sans-serif",
             }}
           >
-            {selectedFaction ? `⚔️ ATTACK FOR ${FACTIONS[selectedFaction].name.toUpperCase()}` : "SELECT YOUR FACTION ABOVE"}
+            {selectedFaction ? `⚔️ ATTACK FOR ${(FACTIONS as any)[selectedFaction].name.toUpperCase()}` : "SELECT YOUR FACTION ABOVE"}
           </button>
         </div>
       </div>
