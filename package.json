@@ -56,7 +56,7 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "dotenv": "^16.4.7",
-    "lucide-react": "^0.469.0",
+    "lucide-react": "^0.562.0",
     "mipd": "^0.0.7",
     "next": "^15",
     "react": "^19",
