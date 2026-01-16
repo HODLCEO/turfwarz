@@ -67,7 +67,7 @@
     "wagmi": "^2.14.12",
     "zod": "^3.24.2",
     "siwe": "^3.0.0",
-    "@neynar/nodejs-sdk": "^2.19.0"
+    "@neynar/nodejs-sdk": "^3.121.0"
   },
   "devDependencies": {
     "@types/inquirer": "^9.0.8",
